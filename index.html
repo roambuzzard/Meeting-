@@ -62,7 +62,7 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
 <body>
 <div class="wrap">
   <div class="bar">
-    <h1>會議口譯</h1>
+    <h1>會議口譯 <span class="hint" style="font-weight:400">v4</span></h1>
     <button id="toggle" class="primary">開始聆聽</button>
     <button id="clear">清除</button>
     <div class="status"><span class="dot" id="dot"></span><span id="statusText">尚未開始</span></div>
@@ -77,6 +77,15 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
       <label for="ctx">會議背景（選填，回覆會更貼切）
         <input id="ctx" type="text" placeholder="例：跟美國客戶討論 Q1 出貨時程，我是 PM">
       </label>
+      <label for="bg">背景資料（專有名詞、規格、文件重點；只存在這台裝置）
+        <textarea id="bg" rows="5" placeholder="貼上背景資料，或用下方按鈕匯入 .txt 檔"></textarea>
+      </label>
+      <div class="row">
+        <button id="bgImport" type="button">匯入 .txt 檔</button>
+        <button id="bgClear" type="button">清空背景資料</button>
+        <span class="hint" id="bgCount"></span>
+        <input id="bgFile" type="file" accept=".txt,text/plain" hidden>
+      </div>
       <div class="row">
         <label for="accent" style="flex:1">對方口音
           <select id="accent">
@@ -131,11 +140,28 @@ const store = {
   get(k, d){ try { const v = localStorage.getItem(k); return v == null ? d : v; } catch(e){ return d; } },
   set(k, v){ try { localStorage.setItem(k, v); } catch(e){} }
 };
-["key","ctx","accent","model","auto","size"].forEach(id => {
+["key","ctx","bg","accent","model","auto","size"].forEach(id => {
   const el = $("#"+id); const v = store.get("mi_"+id, null);
   if (v != null) el.value = v;
-  el.addEventListener("change", () => { store.set("mi_"+id, el.value); applySize(); });
+  const save = () => { store.set("mi_"+id, el.value); applySize(); bgCount(); };
+  el.addEventListener("change", save);
+  el.addEventListener("input", save);
 });
+const BG_MAX = 12000;
+function bgCount(){
+  const n = $("#bg").value.trim().length;
+  $("#bgCount").textContent = n ? ("已載入 " + n + " 字" + (n > BG_MAX ? "（太長，只會使用前 " + BG_MAX + " 字）" : "")) : "尚未設定";
+}
+bgCount();
+$("#bgImport").onclick = () => $("#bgFile").click();
+$("#bgFile").addEventListener("change", e => {
+  const f = e.target.files && e.target.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = () => { $("#bg").value = String(r.result || ""); store.set("mi_bg", $("#bg").value); bgCount(); };
+  r.readAsText(f, "utf-8");
+  e.target.value = "";
+});
+$("#bgClear").onclick = () => { $("#bg").value = ""; store.set("mi_bg", ""); bgCount(); };
 function applySize(){ document.documentElement.style.setProperty("--zh-size", $("#size").value); }
 applySize();
 if (!$("#key").value) $("#settings").open = true;
@@ -164,7 +190,10 @@ async function callClaude(system, user, maxTokens){
         "content-type": "application/json",
         "anthropic-dangerous-direct-browser-access": "true"
       },
-      body: JSON.stringify({ model: $("#model").value, max_tokens: maxTokens, system, messages: [{role: "user", content: user}] })
+      // system prompt (with background) is cached so repeated calls cost less
+      body: JSON.stringify({ model: $("#model").value, max_tokens: maxTokens,
+        system: [{type: "text", text: system, cache_control: {type: "ephemeral"}}],
+        messages: [{role: "user", content: user}] })
     });
   } catch(e){ throw {msg: "網路連線失敗，請檢查網路。"}; }
   if (!r.ok){
@@ -178,9 +207,11 @@ async function callClaude(system, user, maxTokens){
 }
 function sysPrompt(){
   const ctx = $("#ctx").value.trim();
-  return "你是幫台灣使用者參加英文會議的即時口譯助手。一律用繁體中文（台灣用語）。翻譯要自然、口語、簡潔。" +
-    (ctx ? "\n會議背景：" + ctx : "") +
-    "\n只輸出一個 JSON 物件，不要任何其他文字或程式碼框。";
+  const bg = $("#bg").value.trim().slice(0, BG_MAX);
+  return "你是幫台灣使用者參加英文會議的即時口譯助手。一律用繁體中文（台灣用語）。翻譯要自然、口語、簡潔。專有名詞（如 IPQC、Dc,a、haze、ΔE）保留英文不翻。" +
+    (bg ? "\n\n<背景資料>\n" + bg + "\n</背景資料>\n語音辨識常把專有名詞聽錯，請對照背景資料還原正確用詞。回覆建議要盡量引用背景資料裡的實際數據與事實；背景資料沒有的資訊不要編造，改用像 \"Let me check and get back to you.\" 這類說法。" : "") +
+    (ctx ? "\n\n本次會議情境：" + ctx : "") +
+    "\n\n只輸出一個 JSON 物件，不要任何其他文字或程式碼框。";
 }
 function recent(n){ return lines.slice(-n).map(l => "- " + l.en).join("\n"); }
 
