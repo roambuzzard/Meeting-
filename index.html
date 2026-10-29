@@ -83,7 +83,7 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
 <body>
 <div class="wrap">
   <div class="bar">
-    <h1>會議口譯 <span class="hint" style="font-weight:400">v12</span></h1>
+    <h1>會議口譯 <span class="hint" style="font-weight:400">v13</span></h1>
     <button id="toggle" class="primary">開始聆聽</button>
     <button id="analyzeBtn" hidden>分析到這裡</button>
     <button id="newMeeting">新會議</button>
@@ -244,9 +244,12 @@ function saveLines(){ store.set("mi_lines", JSON.stringify(lines)); }
 function nowHM(){ return new Date().toLocaleTimeString("zh-TW", {hour: "2-digit", minute: "2-digit", hour12: false}); }
 function setZh(card, zh){ const i = card.dataset.idx; if (i != null && lines[i]){ lines[i].zh = zh || ""; saveLines(); } }
 function parseJSON(t){
-  const a = t.indexOf("{"), b = t.lastIndexOf("}");
-  if (a < 0 || b <= a) throw new Error("bad json");
-  return JSON.parse(t.slice(a, b + 1));
+  const a = t.indexOf("{");
+  if (a < 0) throw {msg: "回傳格式錯誤"};
+  for (let b = t.lastIndexOf("}"); b > a; b = t.lastIndexOf("}", b - 1)){
+    try { return JSON.parse(t.slice(a, b + 1)); } catch(e){}
+  }
+  throw {msg: "回傳格式錯誤"};
 }
 async function callClaude(system, user, maxTokens, onText){
   const key = $("#key").value.trim();
@@ -364,33 +367,55 @@ ${recent(8) || "（無）"}
 }
 
 /* Answers are a separate call, so they never hold up the translation */
+/* Answers use a simple line format (label ||| English ||| 中文) — quotes can't break it */
+function parseReplyLines(text, includeLast){
+  const rows = text.split("\n");
+  if (!includeLast) rows.pop();                     // last line may still be streaming
+  return rows.map(l => l.split("|||")).filter(p => p.length >= 2 && p[1].trim())
+    .map(p => ({tone: p[0].replace(/^[\s\-*\d.、)）]+/, "").trim(), en: p[1].trim(), zh: (p[2] || "").trim()}));
+}
+const REPLY_RULES =
+`輸出 3 行，每行格式完全照這樣：標籤 ||| 英文回答 ||| 中文意思
+不要輸出任何其他文字、編號、引號或空行。
+- 對方在提問時：第 1 行標籤「直接回答」：依背景資料直接回答，帶具體數字、條件、儀器或文件名，1～2 句；第 2 行「補充說明」：同樣的答案再補上限制或現況（例如規格仍是初步、待 formulation lock）；第 3 行「需要確認」：資料不足或不宜當場承諾時，得體地說會確認後回覆。
+- 背景資料沒有答案時不可編造數字：第 1 行改成說明目前已知最接近的事實，並表示會再確認。
+- 對方是要求我方確認或表態（不是提問）時：標籤改用「同意」「有條件同意」「保留」。
+- 英文口語、簡短、會議中好講出口；專有名詞保留原文。`;
 async function getAnswers(card, en, zh){
   const body = card.querySelector(".body");
-  body.querySelectorAll(".mini, .replies, .ans-wait").forEach(n => n.remove());
+  body.querySelectorAll(".mini, .replies, .ans-wait, .err").forEach(n => n.remove());
   const wait = el("div", "wait ans-wait", "產生建議回答中…"); body.append(wait);
+  const box = el("div", "replies"); body.append(box);
   $("#dockTitle").textContent = "對方問：" + (zh || en) + "（產生回答中…）";
+  $("#dockOpts").replaceChildren();
   const user =
 `最近的對話（舊到新）：
 ${recent(8) || "（無）"}
 
-對方剛說："${en}"${zh ? "（中文：" + zh + "）" : ""}
+對方剛說：${en}${zh ? "（中文：" + zh + "）" : ""}
 
-請寫 3 個「我方的回答」，要能直接照著念。只輸出一個 JSON 物件，不要其他文字或程式碼框：
-{"replies":[{"tone":"直接回答","en":"英文","zh":"中文意思"}, ...]}
-- 對方在提問時：第 1 個 tone「直接回答」：依背景資料直接回答，帶具體數字、條件、儀器或文件名，1～2 句；第 2 個 tone「補充說明」：同樣的答案再補上限制或現況（例如規格仍是初步、待 formulation lock）；第 3 個 tone「需要確認」：資料不足或不宜當場承諾時，得體地說會確認後回覆。
-- 背景資料沒有答案時不可編造數字：第 1 個改成說明目前已知最接近的事實，並表示會再確認。
-- 對方是要求我方確認或表態（不是提問）時：tone 改用「同意」「有條件同意」「保留」。
-- 英文口語、簡短、會議中好講出口；專有名詞保留原文。`;
+請寫 3 個「我方的回答」，要能直接照著念。
+${REPLY_RULES}`;
+  let shown = 0;
+  const show = list => {
+    if (list.length === shown) return;
+    shown = list.length;
+    box.replaceChildren(...list.map(r => replyButton(r, en)));
+    setDock(list, zh || en, en);
+  };
   try {
-    const out = parseJSON(await callClaude(sysPrompt(), user, 900));
+    const raw = await callClaude(sysPrompt(), user, 900, text => show(parseReplyLines(text, false)));
     wait.remove();
-    if (out.replies && out.replies.length){ renderReplies(body, out.replies, en); setDock(out.replies, zh || en, en); }
-    else addReplyBtn(card, en);
+    const list = parseReplyLines(raw, true);
+    if (list.length){ shown = -1; show(list); }
+    else { box.remove(); body.append(el("div", "err", "沒有產生回答，可再試一次。")); addRetry(); }
   } catch(e){
     wait.remove();
-    $("#dockTitle").textContent = "對方提問時，這裡會出現建議回答，點一下就能放大照著念。";
-    const b = el("button", "mini", "回答產生失敗，再試一次"); b.onclick = () => getAnswers(card, en, zh); body.append(b);
+    if (!shown){ box.remove(); $("#dockTitle").textContent = "對方提問時，這裡會出現建議回答，點一下就能放大照著念。"; }
+    body.append(el("div", "err", "回答產生失敗：" + (e.msg || e.message || "未知原因")));
+    addRetry();
   }
+  function addRetry(){ const b = el("button", "mini", "再試一次"); b.onclick = () => getAnswers(card, en, zh); body.append(b); }
 }
 function replyButton(r, q){
   const d = el("button", "reply pick"); d.type = "button";
@@ -511,11 +536,13 @@ async function sayEnglish(){
 ${recent(6) || "（無）"}
 
 我想用英文表達：「${zh}」
-只輸出一個 JSON 物件，不要其他文字或程式碼框：{"replies":[{"tone":"建議／較正式／較輕鬆 等","en":"英文說法","zh":"差別說明"}]} 給 3 個，第一個是最推薦、最好講出口的。`;
+輸出 3 行，每行格式完全照這樣：標籤 ||| 英文說法 ||| 差別說明
+標籤用「建議」「較正式」「較輕鬆」之類；第 1 行是最推薦、最好講出口的。不要輸出任何其他文字、編號、引號或空行。`;
   try {
-    const out = parseJSON(await callClaude(sysPrompt(), user, 600));
-    body.replaceChildren(); renderReplies(body, out.replies, zh);
-  } catch(e){ body.replaceChildren(el("div", "err", e.msg || "產生失敗，可再試一次。")); }
+    const list = parseReplyLines(await callClaude(sysPrompt(), user, 600), true);
+    body.replaceChildren();
+    if (list.length) renderReplies(body, list, zh); else body.append(el("div", "err", "沒有產生結果，可再試一次。"));
+  } catch(e){ body.replaceChildren(el("div", "err", "產生失敗：" + (e.msg || e.message || "未知原因"))); }
   scrollDown();
 }
 $("#sayBtn").onclick = sayEnglish;
