@@ -77,7 +77,7 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
 <body>
 <div class="wrap">
   <div class="bar">
-    <h1>會議口譯 <span class="hint" style="font-weight:400">v7.1</span></h1>
+    <h1>會議口譯 <span class="hint" style="font-weight:400">v8</span></h1>
     <button id="toggle" class="primary">開始聆聽</button>
     <button id="newMeeting">新會議</button>
     <button id="exportBtn">匯出</button>
@@ -216,7 +216,7 @@ function parseJSON(t){
   if (a < 0 || b <= a) throw new Error("bad json");
   return JSON.parse(t.slice(a, b + 1));
 }
-async function callClaude(system, user, maxTokens){
+async function callClaude(system, user, maxTokens, onText){
   const key = $("#key").value.trim();
   if (!key) throw {msg: "請先在「設定」貼上 Claude API 金鑰。"};
   let r;
@@ -229,8 +229,8 @@ async function callClaude(system, user, maxTokens){
         "content-type": "application/json",
         "anthropic-dangerous-direct-browser-access": "true"
       },
-      // system prompt (with background) is cached so repeated calls cost less
-      body: JSON.stringify({ model: $("#model").value, max_tokens: maxTokens,
+      // system prompt (with background) is identical for every call, so it can be cached
+      body: JSON.stringify({ model: $("#model").value, max_tokens: maxTokens, stream: !!onText,
         system: [{type: "text", text: system, cache_control: {type: "ephemeral"}}],
         messages: [{role: "user", content: user}] })
     });
@@ -241,16 +241,34 @@ async function callClaude(system, user, maxTokens){
     if (r.status === 400 && /credit|balance/i.test(detail)) throw {msg: "API 帳戶餘額不足，請到 console.anthropic.com 儲值。"};
     throw {msg: m || ("發生錯誤（" + r.status + "）" + (detail ? "：" + detail : ""))};
   }
-  const data = await r.json();
-  return (data.content || []).map(c => c.text || "").join("");
+  if (!onText){
+    const data = await r.json();
+    return (data.content || []).map(c => c.text || "").join("");
+  }
+  // Streaming: show text as it is written
+  const reader = r.body.getReader(), dec = new TextDecoder();
+  let buf = "", full = "";
+  for (;;){
+    const {value, done} = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, {stream: true});
+    const parts = buf.split("\n"); buf = parts.pop();
+    for (const line of parts){
+      if (!line.startsWith("data:")) continue;
+      let ev; try { ev = JSON.parse(line.slice(5)); } catch(e){ continue; }
+      if (ev.type === "content_block_delta" && ev.delta && ev.delta.type === "text_delta"){ full += ev.delta.text; onText(full); }
+      else if (ev.type === "error") throw {msg: (ev.error && ev.error.type === "overloaded_error") ? "Claude 目前忙碌中，稍後再試。" : "翻譯中斷，可再試一次。"};
+    }
+  }
+  return full;
 }
 function sysPrompt(){
   const ctx = $("#ctx").value.trim();
   const bg = $("#bg").value.trim().slice(0, BG_MAX);
   return "你是幫台灣使用者參加英文會議的即時口譯助手。一律用繁體中文（台灣用語）。翻譯要自然、口語、簡潔。專有名詞（如 IPQC、Dc,a、haze、ΔE）保留英文不翻。" +
-    (bg ? "\n\n<背景資料>\n" + bg + "\n</背景資料>\n語音辨識常把專有名詞聽錯，請對照背景資料還原正確用詞。回覆建議要盡量引用背景資料裡的實際數據與事實；背景資料沒有的資訊不要編造，改用像 \"Let me check and get back to you.\" 這類說法。" : "") +
+    (bg ? "\n\n<背景資料>\n" + bg + "\n</背景資料>\n語音辨識常把專有名詞聽錯，請對照背景資料還原正確用詞。建議回答要盡量引用背景資料裡的實際數據與事實；背景資料沒有的資訊不要編造，改用像 \"Let me check and get back to you.\" 這類說法。" : "") +
     (ctx ? "\n\n本次會議情境：" + ctx : "") +
-    "\n\n只輸出一個 JSON 物件，不要任何其他文字或程式碼框。";
+    "\n\n嚴格依照使用者訊息指定的輸出格式回覆。";
 }
 function recent(n){ return lines.filter(l => l.en).slice(-n).map(l => (l.me ? "- （我方）" : "- ") + l.en).join("\n"); }
 
@@ -283,45 +301,63 @@ async function translate(card, en, forceReply){
     }
     return;
   }
-  body.replaceChildren(el("div", "wait", forceReply ? "產生回覆中…" : "翻譯中…"));
-  const wantAuto = $("#auto").value === "on";
+  if (forceReply){ getAnswers(card, en, lines[card.dataset.idx]?.zh || ""); return; }
+  const zhEl = el("div", "zh"), wait = el("div", "wait", "翻譯中…");
+  body.replaceChildren(wait);
   const user =
 `最近的對話（舊到新，僅供理解上下文）：
 ${recent(8) || "（無）"}
 
-語音辨識可能有錯字，請依上下文合理推測原意。
-請處理對方剛說的這句：
-"${en}"
+語音辨識可能有錯字，請依上下文與背景資料推測原意。
+對方剛說："${en}"
 
-輸出格式：
-{"zh":"中文翻譯","note":"若有難懂的用語、語氣或言外之意，用一句話說明；沒有就空字串",
- "reply_needed":${forceReply ? "true" : "true 或 false（對方在問我方問題、要求確認或等我方表態時為 true）"},
- "replies":[{"tone":"直接回答","en":"我方可以直接講出口的英文","zh":"中文意思"}]}
-${forceReply ? "replies 給 3 個。" : (wantAuto ? "reply_needed 為 true 時 replies 給 3 個，否則給空陣列。" : "replies 給空陣列。")}
-replies 的寫法（這些是「我方的回答」，要能直接照著念）：
-- 若對方在提問：第 1 個 tone「直接回答」：依背景資料直接回答，帶具體數字、條件、儀器或文件名，1～2 句；第 2 個 tone「補充說明」：同樣的答案再補上限制或現況（例如規格仍是初步、待 formulation lock）；第 3 個 tone「需要確認」：資料不足或不宜當場承諾時，得體地說會確認後回覆。
-- 背景資料沒有答案時，不可編造數字：第 1 個改成說明目前已知的最接近事實，並表示會再確認。
-- 若對方是要求我方確認或表態（不是提問）：tone 改用「同意」「有條件同意」「保留」。
-- 英文要口語、簡短、會議中好講出口；專有名詞保留原文。`;
+輸出格式（純文字，不要其他任何文字）：
+第一行：自然的中文翻譯
+第二行：對方是在向我方提問、要求確認或等我方表態就寫 Q，否則寫 -`;
   try {
-    const raw = await callClaude(sysPrompt(), user, 1500);
-    let out;
-    try { out = parseJSON(raw); }
-    catch(pe){   // reply was cut short: keep the translation if it came through
-      const m = raw.match(/"zh"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-      if (!m) throw {msg: "翻譯結果格式錯誤，可再試一次。"};
-      out = {zh: JSON.parse('"' + m[1] + '"'), note: "", replies: []};
-    }
-    if (!forceReply || out.zh) setZh(card, out.zh);
-    body.replaceChildren();
-    if (out.zh) body.append(el("div", "zh", out.zh));
-    if (out.note) body.append(el("div", "note", "💡 " + out.note));
-    renderReplies(body, out.replies, en);
-    if (out.replies && out.replies.length) setDock(out.replies, out.zh || en, en);
+    const raw = await callClaude(sysPrompt(), user, 400, text => {
+      const first = text.split("\n")[0];
+      if (first.trim()){ if (wait.isConnected) body.replaceChildren(zhEl); zhEl.textContent = first; }
+    });
+    const parts = raw.trim().split("\n");
+    const zh = (parts[0] || "").trim(), isQ = /^\s*Q/i.test(parts[1] || "");
+    setZh(card, zh);
+    body.replaceChildren(zhEl); zhEl.textContent = zh;
+    if (isQ && $("#auto").value === "on") getAnswers(card, en, zh);
     else addReplyBtn(card, en);
   } catch(e){
     body.replaceChildren(el("div", "err", e.msg || "翻譯失敗，可再試一次。"));
-    const b = el("button", "mini", "重試"); b.onclick = () => translate(card, en, forceReply); body.append(b);
+    const b = el("button", "mini", "重試"); b.onclick = () => translate(card, en, false); body.append(b);
+  }
+}
+
+/* Answers are a separate call, so they never hold up the translation */
+async function getAnswers(card, en, zh){
+  const body = card.querySelector(".body");
+  body.querySelectorAll(".mini, .replies, .ans-wait").forEach(n => n.remove());
+  const wait = el("div", "wait ans-wait", "產生建議回答中…"); body.append(wait);
+  $("#dockTitle").textContent = "對方問：" + (zh || en) + "（產生回答中…）";
+  const user =
+`最近的對話（舊到新）：
+${recent(8) || "（無）"}
+
+對方剛說："${en}"${zh ? "（中文：" + zh + "）" : ""}
+
+請寫 3 個「我方的回答」，要能直接照著念。只輸出一個 JSON 物件，不要其他文字或程式碼框：
+{"replies":[{"tone":"直接回答","en":"英文","zh":"中文意思"}, ...]}
+- 對方在提問時：第 1 個 tone「直接回答」：依背景資料直接回答，帶具體數字、條件、儀器或文件名，1～2 句；第 2 個 tone「補充說明」：同樣的答案再補上限制或現況（例如規格仍是初步、待 formulation lock）；第 3 個 tone「需要確認」：資料不足或不宜當場承諾時，得體地說會確認後回覆。
+- 背景資料沒有答案時不可編造數字：第 1 個改成說明目前已知最接近的事實，並表示會再確認。
+- 對方是要求我方確認或表態（不是提問）時：tone 改用「同意」「有條件同意」「保留」。
+- 英文口語、簡短、會議中好講出口；專有名詞保留原文。`;
+  try {
+    const out = parseJSON(await callClaude(sysPrompt(), user, 900));
+    wait.remove();
+    if (out.replies && out.replies.length){ renderReplies(body, out.replies, en); setDock(out.replies, zh || en, en); }
+    else addReplyBtn(card, en);
+  } catch(e){
+    wait.remove();
+    $("#dockTitle").textContent = "對方提問時，這裡會出現建議回答，點一下就能放大照著念。";
+    const b = el("button", "mini", "回答產生失敗，再試一次"); b.onclick = () => getAnswers(card, en, zh); body.append(b);
   }
 }
 function replyButton(r, q){
@@ -394,7 +430,7 @@ async function sayEnglish(){
 ${recent(6) || "（無）"}
 
 我想用英文表達：「${zh}」
-輸出格式：{"replies":[{"tone":"建議／較正式／較輕鬆 等","en":"英文說法","zh":"差別說明"}]} 給 3 個，第一個是最推薦、最好講出口的。`;
+只輸出一個 JSON 物件，不要其他文字或程式碼框：{"replies":[{"tone":"建議／較正式／較輕鬆 等","en":"英文說法","zh":"差別說明"}]} 給 3 個，第一個是最推薦、最好講出口的。`;
   try {
     const out = parseJSON(await callClaude(sysPrompt(), user, 600));
     body.replaceChildren(); renderReplies(body, out.replies, zh);
@@ -408,7 +444,7 @@ $("#say").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKe
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null, listening = false, current = "", silenceTimer = null, wakeLock = null, restartFails = 0, lastStart = 0;
 let committedWords = 0;               // words of `current` already sent as cards
-const CHUNK = 22, HOLD = 4;           // split long speech every ~22 words, keep last 4 (may still change)
+const CHUNK = 16, HOLD = 3;           // split long speech every ~16 words, keep last 3 (may still change)
 
 function wordsOf(t){ const w = t.trim(); return w ? w.split(/\s+/) : []; }
 function commit(){
@@ -440,7 +476,7 @@ function startRec(){
     splitLong();
     restartFails = 0;
     clearTimeout(silenceTimer);
-    silenceTimer = setTimeout(() => { try { rec.stop(); } catch(e){} }, 1400); // pause = end of sentence
+    silenceTimer = setTimeout(() => { try { rec.stop(); } catch(e){} }, 1000); // pause = end of sentence
   };
   rec.onerror = e => {
     if (e.error === "not-allowed" || e.error === "service-not-allowed"){
