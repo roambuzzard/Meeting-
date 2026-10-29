@@ -83,7 +83,7 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
 <body>
 <div class="wrap">
   <div class="bar">
-    <h1>會議口譯 <span class="hint" style="font-weight:400">v11</span></h1>
+    <h1>會議口譯 <span class="hint" style="font-weight:400">v12</span></h1>
     <button id="toggle" class="primary">開始聆聽</button>
     <button id="analyzeBtn" hidden>分析到這裡</button>
     <button id="newMeeting">新會議</button>
@@ -544,13 +544,20 @@ function splitLong(){
 }
 const isCont = () => $("#engine").value === "cont";
 let lastResults = null, committedRes = 0, lastCommitted = "";
+let sessionStart = 0, lastActivity = 0;
+const SESSION_MAX = 40000, STALL_MS = 8000;
+/* End the current recognition session right away; onend starts a fresh one */
+function recycle(){ try { rec && rec.abort(); } catch(e){ try { rec.stop(); } catch(_){} } }
+setInterval(() => {   // watchdog: nothing heard for a while = iOS may be stuck, restart
+  if (listening && isCont() && Date.now() - lastActivity > STALL_MS){ lastActivity = Date.now(); commitCont(); recycle(); }
+}, 2000);
 function joinSegs(list){
   let t = "";
   for (const seg of list) t += (t && !/\s$/.test(t) && !/^\s/.test(seg) ? " " : "") + seg;
   return t.trim();
 }
 /* Continuous mode: recognition never restarts; a pause just closes the current card */
-function commitCont(){
+function commitCont(atPause){
   if (!lastResults) return;
   const segs = [];
   for (let i = committedRes; i < lastResults.length; i++) segs.push(lastResults[i][0].transcript);
@@ -562,6 +569,8 @@ function commitCont(){
   if (prevW.length && wordsOf(norm(text)).slice(0, prevW.length).join(" ") === prevW.join(" ")) text = w.slice(prevW.length).join(" ");
   current = ""; committedWords = 0; $("#interim").textContent = "";
   if (wordsOf(text).length >= 2){ lastCommitted = (lastCommitted + " " + text).trim(); addHeard(text); }
+  // long sessions slow iOS down: swap to a fresh one now, during the pause
+  if (atPause && listening && Date.now() - sessionStart > SESSION_MAX) recycle();
 }
 function startRec(){
   rec = new SR();
@@ -570,8 +579,9 @@ function startRec(){
   rec.continuous = cont;        // cont: one long session; restart: one utterance per session
   rec.interimResults = true;
   lastResults = null; committedRes = 0; lastCommitted = "";
+  sessionStart = lastActivity = Date.now();
   rec.onresult = e => {
-    restartFails = 0;
+    restartFails = 0; lastActivity = Date.now();
     clearTimeout(silenceTimer);
     if (cont){
       lastResults = e.results;
@@ -579,7 +589,7 @@ function startRec(){
       for (let i = committedRes; i < e.results.length; i++) segs.push(e.results[i][0].transcript);
       current = joinSegs(segs);
       $("#interim").textContent = current;
-      silenceTimer = setTimeout(commitCont, 1400);           // pause = end of card, mic stays on
+      silenceTimer = setTimeout(() => commitCont(true), 1400);           // pause = end of card, mic stays on
       return;
     }
     let t = "";
@@ -606,7 +616,7 @@ function startRec(){
     if (!listening) return;
     // iOS may still end a continuous session (long silence, time limit): restart right away
     if (Date.now() - lastStart < 400) restartFails++;
-    const delay = restartFails > 5 ? 1500 : 30;
+    const delay = restartFails > 5 ? 1500 : 0;
     setTimeout(() => { if (listening) { lastStart = Date.now(); try { startRec(); } catch(e){} } }, delay);
   };
   lastStart = Date.now();
