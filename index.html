@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="會議口譯">
+<title>會議口譯</title>
+<style>
+:root{
+  --bg:#eef1f4; --panel:#ffffff; --ink:#18222d; --muted:#5d6b78; --line:#d5dce3;
+  --accent:#0f6e6a; --accent-ink:#ffffff; --accent-soft:#dcefed;
+  --en:#1f3d78; --warn:#9a5b00; --rec:#c2362b;
+  --f:-apple-system,"PingFang TC","Noto Sans TC",system-ui,sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#11171d; --panel:#19212a; --ink:#e6ebf0; --muted:#94a2b0; --line:#2b3642;
+  --accent:#4fbfb7; --accent-ink:#0b1715; --accent-soft:#1d3634; --en:#9db8ef; --warn:#e6b25c; --rec:#ff6b5e; color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--f);-webkit-text-size-adjust:100%}
+body{padding:env(safe-area-inset-top) max(14px,env(safe-area-inset-right)) 0 max(14px,env(safe-area-inset-left))}
+.wrap{max-width:820px;margin:0 auto;display:flex;flex-direction:column;min-height:100dvh}
+.bar{position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--line)}
+.bar h1{font-size:1.1rem;margin:0;flex:1;min-width:6em}
+button{font:inherit;font-weight:600;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:9px 14px;cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+button.stop{background:var(--rec);border-color:var(--rec);color:#fff}
+button:disabled{opacity:.5}
+.status{width:100%;font-size:.82rem;color:var(--muted);display:flex;gap:8px;align-items:center}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
+.dot.live{background:var(--rec);animation:pulse 1.2s infinite}
+@keyframes pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.dot.live{animation:none}}
+details.settings{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin-top:10px}
+details.settings summary{padding:12px 14px;font-weight:600;cursor:pointer}
+.form{display:grid;gap:12px;padding:0 14px 14px}
+.form label{display:grid;gap:4px;font-size:.85rem;color:var(--muted)}
+input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 10px;width:100%}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.hint{font-size:.8rem;color:var(--muted);margin:0}
+.feed{flex:1;display:flex;flex-direction:column;gap:12px;padding:14px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:grid;gap:8px}
+.card.me{border-color:var(--accent)}
+.en{color:var(--en);font-size:.98rem;line-height:1.45}
+.zh{font-size:var(--zh-size,1.25rem);font-weight:600;line-height:1.5}
+.note{font-size:.85rem;color:var(--muted)}
+.wait{color:var(--muted);font-size:.9rem}
+.err{color:var(--warn);font-size:.88rem}
+.replies{display:grid;gap:6px}
+.reply{background:var(--accent-soft);border-radius:10px;padding:9px 11px;display:grid;gap:2px}
+.reply .tone{font-size:.75rem;font-weight:700;color:var(--accent)}
+.reply .ren{font-size:1.08rem;line-height:1.4}
+.reply .rzh{font-size:.82rem;color:var(--muted)}
+.mini{font-size:.8rem;padding:5px 10px;justify-self:start}
+.interim{color:var(--muted);font-style:italic;min-height:1.4em;padding:0 4px}
+.empty{color:var(--muted);text-align:center;padding:30px 10px;line-height:1.7}
+.composer{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:10px 0 max(10px,env(safe-area-inset-bottom));display:flex;gap:8px}
+.composer textarea{flex:1;min-height:44px;max-height:120px;resize:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <h1>會議口譯</h1>
+    <button id="toggle" class="primary">開始聆聽</button>
+    <button id="clear">清除</button>
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">尚未開始</span></div>
+  </div>
+
+  <details class="settings" id="settings">
+    <summary>設定</summary>
+    <div class="form">
+      <label for="key">Claude API 金鑰（只存在這台裝置）
+        <input id="key" type="password" autocomplete="off" placeholder="sk-ant-...">
+      </label>
+      <label for="ctx">會議背景（選填，回覆會更貼切）
+        <input id="ctx" type="text" placeholder="例：跟美國客戶討論 Q1 出貨時程，我是 PM">
+      </label>
+      <div class="row">
+        <label for="accent" style="flex:1">對方口音
+          <select id="accent">
+            <option value="en-US">美式英文</option>
+            <option value="en-GB">英式英文</option>
+            <option value="en-IN">印度英文</option>
+            <option value="en-AU">澳洲英文</option>
+            <option value="en-SG">新加坡英文</option>
+          </select>
+        </label>
+        <label for="model" style="flex:1">速度／品質
+          <select id="model">
+            <option value="claude-haiku-5-5">快速（建議）</option>
+            <option value="claude-sonnet-5-5">較精準（較慢、較貴）</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <label for="auto" style="flex:1">自動建議回覆
+          <select id="auto">
+            <option value="on">對方問問題時自動給</option>
+            <option value="off">只在我按按鈕時給</option>
+          </select>
+        </label>
+        <label for="size" style="flex:1">中文字大小
+          <select id="size">
+            <option value="1.1rem">小</option>
+            <option value="1.25rem" selected>中</option>
+            <option value="1.5rem">大</option>
+          </select>
+        </label>
+      </div>
+      <p class="hint">金鑰存在本機瀏覽器，不會傳到 Anthropic 以外的地方。</p>
+    </div>
+  </details>
+
+  <div class="feed" id="feed">
+    <div class="empty" id="empty">按「開始聆聽」，把 iPhone／iPad 放在電腦喇叭旁邊。<br>對方說的每一句會在這裡顯示英文、中文翻譯；<br>需要回應時會出現英文回覆建議。</div>
+  </div>
+  <div class="interim" id="interim"></div>
+
+  <div class="composer">
+    <textarea id="say" rows="1" placeholder="我想說（中文）→ 幫我講成英文"></textarea>
+    <button id="sayBtn" class="primary">英文</button>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const feed = $("#feed");
+const store = {
+  get(k, d){ try { const v = localStorage.getItem(k); return v == null ? d : v; } catch(e){ return d; } },
+  set(k, v){ try { localStorage.setItem(k, v); } catch(e){} }
+};
+["key","ctx","accent","model","auto","size"].forEach(id => {
+  const el = $("#"+id); const v = store.get("mi_"+id, null);
+  if (v != null) el.value = v;
+  el.addEventListener("change", () => { store.set("mi_"+id, el.value); applySize(); });
+});
+function applySize(){ document.documentElement.style.setProperty("--zh-size", $("#size").value); }
+applySize();
+if (!$("#key").value) $("#settings").open = true;
+
+function setStatus(text, live){ $("#statusText").textContent = text; $("#dot").className = "dot" + (live ? " live" : ""); }
+function el(tag, cls, text){ const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+function scrollDown(){ window.scrollTo({top: document.body.scrollHeight, behavior: "smooth"}); }
+
+/* ---------- Claude API ---------- */
+const lines = []; // {en, zh}
+function parseJSON(t){
+  const a = t.indexOf("{"), b = t.lastIndexOf("}");
+  if (a < 0 || b <= a) throw new Error("bad json");
+  return JSON.parse(t.slice(a, b + 1));
+}
+async function callClaude(system, user, maxTokens){
+  const key = $("#key").value.trim();
+  if (!key) throw {msg: "請先在「設定」貼上 Claude API 金鑰。"};
+  let r;
+  try {
+    r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+        "anthropic-dangerous-direct-browser-access": "true"
+      },
+      body: JSON.stringify({ model: $("#model").value, max_tokens: maxTokens, system, messages: [{role: "user", content: user}] })
+    });
+  } catch(e){ throw {msg: "網路連線失敗，請檢查網路。"}; }
+  if (!r.ok){
+    const m = {401: "API 金鑰錯誤，請到設定重新貼上。", 403: "這把金鑰沒有權限使用此模型。", 429: "送出太頻繁或已達用量上限，稍後再試。", 529: "Claude 目前忙碌中，稍後再試。"}[r.status];
+    let detail = ""; try { detail = (await r.json()).error?.message || ""; } catch(e){}
+    if (r.status === 400 && /credit|balance/i.test(detail)) throw {msg: "API 帳戶餘額不足，請到 console.anthropic.com 儲值。"};
+    throw {msg: m || ("發生錯誤（" + r.status + "）" + (detail ? "：" + detail : ""))};
+  }
+  const data = await r.json();
+  return (data.content || []).map(c => c.text || "").join("");
+}
+function sysPrompt(){
+  const ctx = $("#ctx").value.trim();
+  return "你是幫台灣使用者參加英文會議的即時口譯助手。一律用繁體中文（台灣用語）。翻譯要自然、口語、簡潔。" +
+    (ctx ? "\n會議背景：" + ctx : "") +
+    "\n只輸出一個 JSON 物件，不要任何其他文字或程式碼框。";
+}
+function recent(n){ return lines.slice(-n).map(l => "- " + l.en).join("\n"); }
+
+async function translate(card, en, forceReply){
+  const body = card.querySelector(".body");
+  body.replaceChildren(el("div", "wait", forceReply ? "產生回覆中…" : "翻譯中…"));
+  const wantAuto = $("#auto").value === "on";
+  const user =
+`最近的對話（舊到新，僅供理解上下文）：
+${recent(8) || "（無）"}
+
+語音辨識可能有錯字，請依上下文合理推測原意。
+請處理對方剛說的這句：
+"${en}"
+
+輸出格式：
+{"zh":"中文翻譯","note":"若有難懂的用語、語氣或言外之意，用一句話說明；沒有就空字串",
+ "reply_needed":${forceReply ? "true" : "true 或 false（對方在問我方問題、要求確認或等我方表態時為 true）"},
+ "replies":[{"tone":"2-6字策略，如 同意確認／爭取時間／提出疑問","en":"簡短口語、會議中好講出口的英文","zh":"中文意思"}]}
+${forceReply ? "replies 給 3 個。" : (wantAuto ? "reply_needed 為 true 時 replies 給 3 個，否則給空陣列。" : "replies 給空陣列。")}`;
+  try {
+    const out = parseJSON(await callClaude(sysPrompt(), user, 700));
+    const idx = card.dataset.idx; if (idx != null && lines[idx]) lines[idx].zh = out.zh || "";
+    body.replaceChildren();
+    if (out.zh) body.append(el("div", "zh", out.zh));
+    if (out.note) body.append(el("div", "note", "💡 " + out.note));
+    renderReplies(body, out.replies);
+    if (!out.replies || !out.replies.length) addReplyBtn(card, en);
+  } catch(e){
+    body.replaceChildren(el("div", "err", e.msg || "翻譯失敗，可再試一次。"));
+    const b = el("button", "mini", "重試"); b.onclick = () => translate(card, en, forceReply); body.append(b);
+  }
+}
+function renderReplies(body, replies){
+  if (!replies || !replies.length) return;
+  const box = el("div", "replies");
+  replies.forEach(r => {
+    const d = el("div", "reply");
+    d.append(el("div", "tone", r.tone || ""), el("div", "ren", r.en || ""), el("div", "rzh", r.zh || ""));
+    box.append(d);
+  });
+  body.append(box);
+}
+function addReplyBtn(card, en){
+  const b = el("button", "mini", "我要怎麼回？");
+  b.onclick = () => translate(card, en, true);
+  card.querySelector(".body").append(b);
+}
+
+function addHeard(en){
+  $("#empty")?.remove();
+  lines.push({en, zh: ""});
+  const card = el("div", "card"); card.dataset.idx = lines.length - 1;
+  card.append(el("div", "en", en), el("div", "body"));
+  feed.append(card); scrollDown();
+  translate(card, en, false);
+}
+
+async function sayEnglish(){
+  const zh = $("#say").value.trim(); if (!zh) return;
+  $("#say").value = "";
+  $("#empty")?.remove();
+  const card = el("div", "card me");
+  card.append(el("div", "note", "我想說：" + zh));
+  const body = el("div", "body"); body.append(el("div", "wait", "產生中…")); card.append(body);
+  feed.append(card); scrollDown();
+  const user =
+`最近對方說的話（舊到新）：
+${recent(6) || "（無）"}
+
+我想用英文表達：「${zh}」
+輸出格式：{"replies":[{"tone":"建議／較正式／較輕鬆 等","en":"英文說法","zh":"差別說明"}]} 給 3 個，第一個是最推薦、最好講出口的。`;
+  try {
+    const out = parseJSON(await callClaude(sysPrompt(), user, 600));
+    body.replaceChildren(); renderReplies(body, out.replies);
+  } catch(e){ body.replaceChildren(el("div", "err", e.msg || "產生失敗，可再試一次。")); }
+  scrollDown();
+}
+$("#sayBtn").onclick = sayEnglish;
+$("#say").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sayEnglish(); } });
+
+/* ---------- Speech recognition ---------- */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, listening = false, current = "", silenceTimer = null, wakeLock = null, restartFails = 0, lastStart = 0;
+
+function commit(){
+  const t = current.trim(); current = ""; $("#interim").textContent = "";
+  if (t && t.split(/\s+/).length >= 2) addHeard(t);
+}
+function startRec(){
+  rec = new SR();
+  rec.lang = $("#accent").value;
+  rec.continuous = false;       // one utterance per session = natural sentence breaks
+  rec.interimResults = true;
+  rec.onresult = e => {
+    let t = ""; for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
+    current = t; $("#interim").textContent = t;
+    restartFails = 0;
+    clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => { try { rec.stop(); } catch(e){} }, 1400); // pause = end of sentence
+  };
+  rec.onerror = e => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed"){
+      stopListening();
+      setStatus("無法使用麥克風：請到 設定 → Safari → 麥克風 允許，並確認「聽寫」已開啟。", false);
+    }
+  };
+  rec.onend = () => {
+    clearTimeout(silenceTimer);
+    commit();
+    if (!listening) return;
+    if (Date.now() - lastStart < 400) restartFails++;
+    const delay = restartFails > 5 ? 1500 : 60;
+    setTimeout(() => { if (listening) { lastStart = Date.now(); try { startRec(); } catch(e){} } }, delay);
+  };
+  lastStart = Date.now();
+  rec.start();
+}
+async function keepAwake(){
+  try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); } catch(e){}
+}
+document.addEventListener("visibilitychange", () => { if (listening && document.visibilityState === "visible") keepAwake(); });
+
+function startListening(){
+  if (!SR){ setStatus("這個瀏覽器不支援語音辨識，請用 iPhone／iPad 的 Safari 開啟。", false); return; }
+  if (!$("#key").value.trim()){ $("#settings").open = true; $("#key").focus(); setStatus("請先貼上 API 金鑰。", false); return; }
+  listening = true; restartFails = 0;
+  $("#toggle").textContent = "停止"; $("#toggle").className = "stop";
+  setStatus("聆聽中…（螢幕請保持開啟）", true);
+  keepAwake();
+  try { startRec(); } catch(e){ setStatus("無法啟動語音辨識，請重新整理頁面。", false); listening = false; }
+}
+function stopListening(){
+  listening = false;
+  try { rec && rec.stop(); } catch(e){}
+  try { wakeLock && wakeLock.release(); } catch(e){}
+  $("#toggle").textContent = "開始聆聽"; $("#toggle").className = "primary";
+  setStatus("已停止", false);
+}
+$("#toggle").onclick = () => listening ? stopListening() : startListening();
+$("#clear").onclick = () => { lines.length = 0; feed.replaceChildren(); $("#interim").textContent = ""; };
+if (!SR) setStatus("這個瀏覽器不支援語音辨識，請用 Safari 開啟。", false);
+</script>
+</body>
+</html>
