@@ -109,7 +109,7 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
           </select>
         </label>
       </div>
-      <p class="hint">金鑰存在本機瀏覽器，不會傳到 Anthropic 以外的地方。</p>
+      <p class="hint">金鑰存在本機瀏覽器，不會傳到 Anthropic 以外的地方。<br>沒有金鑰也能用「測試模式」：語音辨識＋免費翻譯（品質普通、每天有上限），但沒有回覆建議。</p>
     </div>
   </details>
 
@@ -184,8 +184,34 @@ function sysPrompt(){
 }
 function recent(n){ return lines.slice(-n).map(l => "- " + l.en).join("\n"); }
 
+/* Free test mode (no API key): MyMemory translation, no reply suggestions */
+async function freeTranslate(text, pair){
+  let r;
+  try { r = await fetch("https://api.mymemory.translated.net/get?q=" + encodeURIComponent(text.slice(0, 450)) + "&langpair=" + pair); }
+  catch(e){ throw {msg: "免費翻譯連線失敗，請檢查網路。"}; }
+  if (!r.ok) throw {msg: "免費翻譯暫時無法使用（" + r.status + "）。"};
+  const d = await r.json();
+  const t = d.responseData && d.responseData.translatedText;
+  if (!t || /MYMEMORY WARNING|QUOTA/i.test(t) || d.responseStatus == 429) throw {msg: "今天的免費翻譯額度用完了，明天再試，或在設定貼上 API 金鑰。"};
+  return t;
+}
+const hasKey = () => !!$("#key").value.trim();
+
 async function translate(card, en, forceReply){
   const body = card.querySelector(".body");
+  if (!hasKey()){
+    if (forceReply){ $("#settings").open = true; window.scrollTo({top: 0, behavior: "smooth"}); return; }
+    body.replaceChildren(el("div", "wait", "翻譯中…"));
+    try {
+      const zh = await freeTranslate(en, "en|zh-TW");
+      body.replaceChildren(el("div", "zh", zh));
+      const b = el("button", "mini", "我要怎麼回？（需 API 金鑰）"); b.onclick = () => translate(card, en, true); body.append(b);
+    } catch(e){
+      body.replaceChildren(el("div", "err", e.msg));
+      const b = el("button", "mini", "重試"); b.onclick = () => translate(card, en, false); body.append(b);
+    }
+    return;
+  }
   body.replaceChildren(el("div", "wait", forceReply ? "產生回覆中…" : "翻譯中…"));
   const wantAuto = $("#auto").value === "on";
   const user =
@@ -202,7 +228,14 @@ ${recent(8) || "（無）"}
  "replies":[{"tone":"2-6字策略，如 同意確認／爭取時間／提出疑問","en":"簡短口語、會議中好講出口的英文","zh":"中文意思"}]}
 ${forceReply ? "replies 給 3 個。" : (wantAuto ? "reply_needed 為 true 時 replies 給 3 個，否則給空陣列。" : "replies 給空陣列。")}`;
   try {
-    const out = parseJSON(await callClaude(sysPrompt(), user, 700));
+    const raw = await callClaude(sysPrompt(), user, 1500);
+    let out;
+    try { out = parseJSON(raw); }
+    catch(pe){   // reply was cut short: keep the translation if it came through
+      const m = raw.match(/"zh"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (!m) throw {msg: "翻譯結果格式錯誤，可再試一次。"};
+      out = {zh: JSON.parse('"' + m[1] + '"'), note: "", replies: []};
+    }
     const idx = card.dataset.idx; if (idx != null && lines[idx]) lines[idx].zh = out.zh || "";
     body.replaceChildren();
     if (out.zh) body.append(el("div", "zh", out.zh));
@@ -247,6 +280,11 @@ async function sayEnglish(){
   card.append(el("div", "note", "我想說：" + zh));
   const body = el("div", "body"); body.append(el("div", "wait", "產生中…")); card.append(body);
   feed.append(card); scrollDown();
+  if (!hasKey()){
+    try { const en = await freeTranslate(zh, "zh-TW|en"); body.replaceChildren(el("div", "zh", en), el("div", "note", "免費翻譯（測試模式）：貼上 API 金鑰後會給更自然的會議說法。")); }
+    catch(e){ body.replaceChildren(el("div", "err", e.msg)); }
+    scrollDown(); return;
+  }
   const user =
 `最近對方說的話（舊到新）：
 ${recent(6) || "（無）"}
@@ -265,10 +303,23 @@ $("#say").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKe
 /* ---------- Speech recognition ---------- */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null, listening = false, current = "", silenceTimer = null, wakeLock = null, restartFails = 0, lastStart = 0;
+let committedWords = 0;               // words of `current` already sent as cards
+const CHUNK = 22, HOLD = 4;           // split long speech every ~22 words, keep last 4 (may still change)
 
+function wordsOf(t){ const w = t.trim(); return w ? w.split(/\s+/) : []; }
 function commit(){
-  const t = current.trim(); current = ""; $("#interim").textContent = "";
-  if (t && t.split(/\s+/).length >= 2) addHeard(t);
+  const rest = wordsOf(current).slice(committedWords);
+  current = ""; committedWords = 0; $("#interim").textContent = "";
+  if (rest.length >= 2) addHeard(rest.join(" "));
+}
+function splitLong(){
+  const w = wordsOf(current);
+  if (w.length - committedWords >= CHUNK){
+    const end = w.length - HOLD;
+    addHeard(w.slice(committedWords, end).join(" "));
+    committedWords = end;
+  }
+  $("#interim").textContent = wordsOf(current).slice(committedWords).join(" ");
 }
 function startRec(){
   rec = new SR();
@@ -276,8 +327,13 @@ function startRec(){
   rec.continuous = false;       // one utterance per session = natural sentence breaks
   rec.interimResults = true;
   rec.onresult = e => {
-    let t = ""; for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
-    current = t; $("#interim").textContent = t;
+    let t = "";
+    for (let i = 0; i < e.results.length; i++){
+      const seg = e.results[i][0].transcript;
+      t += (t && !/\s$/.test(t) && !/^\s/.test(seg) ? " " : "") + seg;   // avoid "laterYou're"
+    }
+    current = t;
+    splitLong();
     restartFails = 0;
     clearTimeout(silenceTimer);
     silenceTimer = setTimeout(() => { try { rec.stop(); } catch(e){} }, 1400); // pause = end of sentence
@@ -306,10 +362,9 @@ document.addEventListener("visibilitychange", () => { if (listening && document.
 
 function startListening(){
   if (!SR){ setStatus("這個瀏覽器不支援語音辨識，請用 iPhone／iPad 的 Safari 開啟。", false); return; }
-  if (!$("#key").value.trim()){ $("#settings").open = true; $("#key").focus(); setStatus("請先貼上 API 金鑰。", false); return; }
   listening = true; restartFails = 0;
   $("#toggle").textContent = "停止"; $("#toggle").className = "stop";
-  setStatus("聆聽中…（螢幕請保持開啟）", true);
+  setStatus(hasKey() ? "聆聽中…（螢幕請保持開啟）" : "測試模式聆聽中：免費翻譯、沒有回覆建議", true);
   keepAwake();
   try { startRec(); } catch(e){ setStatus("無法啟動語音辨識，請重新整理頁面。", false); listening = false; }
 }
