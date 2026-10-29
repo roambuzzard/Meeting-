@@ -55,6 +55,9 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
 .mini{font-size:.8rem;padding:5px 10px;justify-self:start}
 .interim{color:var(--muted);font-style:italic;min-height:1.4em;padding:0 4px}
 .empty{color:var(--muted);text-align:center;padding:30px 10px;line-height:1.7}
+.mtg{display:grid;gap:6px;padding:10px 0;border-top:1px solid var(--line)}
+.mtg:first-child{border-top:0}
+.mtg .t{font-weight:600}
 .composer{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:10px 0 max(10px,env(safe-area-inset-bottom));display:flex;gap:8px}
 .composer textarea{flex:1;min-height:44px;max-height:120px;resize:none}
 </style>
@@ -62,9 +65,10 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
 <body>
 <div class="wrap">
   <div class="bar">
-    <h1>會議口譯 <span class="hint" style="font-weight:400">v4</span></h1>
+    <h1>會議口譯 <span class="hint" style="font-weight:400">v6</span></h1>
     <button id="toggle" class="primary">開始聆聽</button>
-    <button id="clear">清除</button>
+    <button id="newMeeting">新會議</button>
+    <button id="exportBtn">匯出</button>
     <div class="status"><span class="dot" id="dot"></span><span id="statusText">尚未開始</span></div>
   </div>
 
@@ -122,6 +126,11 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
     </div>
   </details>
 
+  <details class="settings" id="history">
+    <summary id="historySum">過去的會議</summary>
+    <div class="form" id="historyList"></div>
+  </details>
+
   <div class="feed" id="feed">
     <div class="empty" id="empty">按「開始聆聽」，把 iPhone／iPad 放在電腦喇叭旁邊。<br>對方說的每一句會在這裡顯示英文、中文翻譯；<br>需要回應時會出現英文回覆建議。</div>
   </div>
@@ -171,7 +180,11 @@ function el(tag, cls, text){ const n = document.createElement(tag); if (cls) n.c
 function scrollDown(){ window.scrollTo({top: document.body.scrollHeight, behavior: "smooth"}); }
 
 /* ---------- Claude API ---------- */
-const lines = []; // {en, zh}
+// Transcript: {t, en, zh, me?} — kept on this device so a reload doesn't lose the meeting
+const lines = (() => { try { return JSON.parse(store.get("mi_lines", "[]")) || []; } catch(e){ return []; } })();
+function saveLines(){ store.set("mi_lines", JSON.stringify(lines)); }
+function nowHM(){ return new Date().toLocaleTimeString("zh-TW", {hour: "2-digit", minute: "2-digit", hour12: false}); }
+function setZh(card, zh){ const i = card.dataset.idx; if (i != null && lines[i]){ lines[i].zh = zh || ""; saveLines(); } }
 function parseJSON(t){
   const a = t.indexOf("{"), b = t.lastIndexOf("}");
   if (a < 0 || b <= a) throw new Error("bad json");
@@ -213,7 +226,7 @@ function sysPrompt(){
     (ctx ? "\n\n本次會議情境：" + ctx : "") +
     "\n\n只輸出一個 JSON 物件，不要任何其他文字或程式碼框。";
 }
-function recent(n){ return lines.slice(-n).map(l => "- " + l.en).join("\n"); }
+function recent(n){ return lines.filter(l => l.en).slice(-n).map(l => (l.me ? "- （我方）" : "- ") + l.en).join("\n"); }
 
 /* Free test mode (no API key): MyMemory translation, no reply suggestions */
 async function freeTranslate(text, pair){
@@ -235,6 +248,7 @@ async function translate(card, en, forceReply){
     body.replaceChildren(el("div", "wait", "翻譯中…"));
     try {
       const zh = await freeTranslate(en, "en|zh-TW");
+      setZh(card, zh);
       body.replaceChildren(el("div", "zh", zh));
       const b = el("button", "mini", "我要怎麼回？（需 API 金鑰）"); b.onclick = () => translate(card, en, true); body.append(b);
     } catch(e){
@@ -267,7 +281,7 @@ ${forceReply ? "replies 給 3 個。" : (wantAuto ? "reply_needed 為 true 時 r
       if (!m) throw {msg: "翻譯結果格式錯誤，可再試一次。"};
       out = {zh: JSON.parse('"' + m[1] + '"'), note: "", replies: []};
     }
-    const idx = card.dataset.idx; if (idx != null && lines[idx]) lines[idx].zh = out.zh || "";
+    if (!forceReply || out.zh) setZh(card, out.zh);
     body.replaceChildren();
     if (out.zh) body.append(el("div", "zh", out.zh));
     if (out.note) body.append(el("div", "note", "💡 " + out.note));
@@ -296,9 +310,9 @@ function addReplyBtn(card, en){
 
 function addHeard(en){
   $("#empty")?.remove();
-  lines.push({en, zh: ""});
+  lines.push({t: nowHM(), en, zh: ""}); saveLines();
   const card = el("div", "card"); card.dataset.idx = lines.length - 1;
-  card.append(el("div", "en", en), el("div", "body"));
+  card.append(el("div", "note", lines[lines.length - 1].t), el("div", "en", en), el("div", "body"));
   feed.append(card); scrollDown();
   translate(card, en, false);
 }
@@ -307,12 +321,14 @@ async function sayEnglish(){
   const zh = $("#say").value.trim(); if (!zh) return;
   $("#say").value = "";
   $("#empty")?.remove();
-  const card = el("div", "card me");
-  card.append(el("div", "note", "我想說：" + zh));
+  lines.push({t: nowHM(), me: true, zh, en: ""}); saveLines();
+  const card = el("div", "card me"); card.dataset.idx = lines.length - 1;
+  card.append(el("div", "note", lines[lines.length - 1].t + "　我想說：" + zh));
+  const setMine = en => { const i = card.dataset.idx; if (lines[i]){ lines[i].en = en || ""; saveLines(); } };
   const body = el("div", "body"); body.append(el("div", "wait", "產生中…")); card.append(body);
   feed.append(card); scrollDown();
   if (!hasKey()){
-    try { const en = await freeTranslate(zh, "zh-TW|en"); body.replaceChildren(el("div", "zh", en), el("div", "note", "免費翻譯（測試模式）：貼上 API 金鑰後會給更自然的會議說法。")); }
+    try { const en = await freeTranslate(zh, "zh-TW|en"); setMine(en); body.replaceChildren(el("div", "zh", en), el("div", "note", "免費翻譯（測試模式）：貼上 API 金鑰後會給更自然的會議說法。")); }
     catch(e){ body.replaceChildren(el("div", "err", e.msg)); }
     scrollDown(); return;
   }
@@ -324,7 +340,7 @@ ${recent(6) || "（無）"}
 輸出格式：{"replies":[{"tone":"建議／較正式／較輕鬆 等","en":"英文說法","zh":"差別說明"}]} 給 3 個，第一個是最推薦、最好講出口的。`;
   try {
     const out = parseJSON(await callClaude(sysPrompt(), user, 600));
-    body.replaceChildren(); renderReplies(body, out.replies);
+    setMine(out.replies && out.replies[0] && out.replies[0].en); body.replaceChildren(); renderReplies(body, out.replies);
   } catch(e){ body.replaceChildren(el("div", "err", e.msg || "產生失敗，可再試一次。")); }
   scrollDown();
 }
@@ -407,7 +423,84 @@ function stopListening(){
   setStatus("已停止", false);
 }
 $("#toggle").onclick = () => listening ? stopListening() : startListening();
-$("#clear").onclick = () => { lines.length = 0; feed.replaceChildren(); $("#interim").textContent = ""; };
+/* ---------- Meetings: current one + archived list ---------- */
+let meetings = (() => { try { return JSON.parse(store.get("mi_meetings", "[]")) || []; } catch(e){ return []; } })();
+function saveMeetings(){ store.set("mi_meetings", JSON.stringify(meetings.slice(0, 30))); }
+function stamp(d){ d = d || new Date(); return (d.getMonth() + 1) + "/" + d.getDate() + " " + d.toTimeString().slice(0, 5); }
+if (!store.get("mi_cur_start", "")) store.set("mi_cur_start", String(Date.now()));
+
+function meetingTitle(m){ return stamp(new Date(m.start)) + (m.ctx ? "　" + m.ctx : "") + "（" + m.lines.length + " 句）"; }
+
+function transcriptText(m){
+  const d = new Date(m.start), ymd = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  const out = ["會議逐字稿（" + ymd + " " + d.toTimeString().slice(0, 5) + "）" + (m.ctx ? "\n會議情境：" + m.ctx : ""),
+    "格式：[時間] 對方英文原文（語音辨識，可能有錯字）／中文翻譯；「我方」為我想表達的內容", ""];
+  m.lines.forEach(l => {
+    if (l.me) out.push("[" + (l.t || "") + "] 我方：" + l.zh + (l.en ? "\n    EN: " + l.en : ""));
+    else out.push("[" + (l.t || "") + "] " + l.en + (l.zh ? "\n    中：" + l.zh : ""));
+  });
+  return {name: "會議逐字稿_" + ymd + "_" + d.toTimeString().slice(0, 5).replace(":", "") + ".txt", text: out.join("\n")};
+}
+async function exportMeeting(m){
+  if (!m.lines.length){ setStatus("這場會議沒有紀錄可以匯出。", listening); return; }
+  const {name, text} = transcriptText(m);
+  try {
+    const file = new File([text], name, {type: "text/plain"});
+    if (navigator.canShare && navigator.canShare({files: [file]})){ await navigator.share({files: [file], title: name}); return; }
+    if (navigator.share){ await navigator.share({title: name, text}); return; }
+  } catch(e){ if (e && e.name === "AbortError") return; }
+  try { await navigator.clipboard.writeText(text); setStatus("已複製逐字稿，可以貼到 Claude。", listening); }
+  catch(e){ setStatus("無法匯出，請改用電腦瀏覽器開啟。", listening); }
+}
+function currentMeeting(){ return {start: Number(store.get("mi_cur_start", Date.now())), ctx: $("#ctx").value.trim(), lines}; }
+$("#exportBtn").onclick = () => exportMeeting(currentMeeting());
+
+function confirmTwice(btn, label, action){
+  let armed = null;
+  btn.onclick = () => {
+    if (!armed){ btn.textContent = "再按一次確認"; armed = setTimeout(() => { armed = null; btn.textContent = label; }, 3000); return; }
+    clearTimeout(armed); armed = null; btn.textContent = label; action();
+  };
+}
+function renderHistory(){
+  const list = $("#historyList"); list.replaceChildren();
+  $("#historySum").textContent = "過去的會議（" + meetings.length + "）";
+  if (!meetings.length){ list.append(el("p", "hint", "按「新會議」後，上一場會自動存到這裡。")); return; }
+  meetings.forEach((m, i) => {
+    const row = el("div", "mtg"), btns = el("div", "row");
+    const ex = el("button", "mini", "匯出"); ex.onclick = () => exportMeeting(m);
+    const del = el("button", "mini", "刪除");
+    confirmTwice(del, "刪除", () => { meetings.splice(i, 1); saveMeetings(); renderHistory(); });
+    btns.append(ex, del);
+    row.append(el("div", "t", meetingTitle(m)), btns);
+    list.append(row);
+  });
+}
+renderHistory();
+
+confirmTwice($("#newMeeting"), "新會議", () => {
+  if (lines.length){
+    meetings.unshift({start: Number(store.get("mi_cur_start", Date.now())), end: Date.now(), ctx: $("#ctx").value.trim(), lines: lines.slice()});
+    saveMeetings();
+  }
+  lines.length = 0; saveLines(); store.set("mi_cur_start", String(Date.now()));
+  const msg = el("div", "empty", "新會議已開始。上一場已存到「過去的會議」，可以隨時匯出。"); msg.id = "empty";
+  feed.replaceChildren(msg);
+  $("#interim").textContent = "";
+  renderHistory();
+  setStatus(listening ? "聆聽中…（新會議）" : "新會議已開始", listening);
+});
+
+/* Restore the saved transcript after a reload */
+if (lines.length){
+  $("#empty")?.remove();
+  lines.forEach((l, i) => {
+    const card = el("div", "card" + (l.me ? " me" : "")); card.dataset.idx = i;
+    if (l.me){ card.append(el("div", "note", (l.t || "") + "　我想說：" + l.zh)); if (l.en) card.append(el("div", "en", l.en)); }
+    else { card.append(el("div", "note", l.t || ""), el("div", "en", l.en)); if (l.zh) card.append(el("div", "zh", l.zh)); }
+    feed.append(card);
+  });
+}
 if (!SR) setStatus("這個瀏覽器不支援語音辨識，請用 Safari 開啟。", false);
 </script>
 </body>
