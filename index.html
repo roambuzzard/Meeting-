@@ -18,6 +18,7 @@
   --bg:#11171d; --panel:#19212a; --ink:#e6ebf0; --muted:#94a2b0; --line:#2b3642;
   --accent:#4fbfb7; --accent-ink:#0b1715; --accent-soft:#1d3634; --en:#9db8ef; --warn:#e6b25c; --rec:#ff6b5e; color-scheme:dark}}
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--f);-webkit-text-size-adjust:100%}
 body{padding:env(safe-area-inset-top) max(14px,env(safe-area-inset-right)) 0 max(14px,env(safe-area-inset-left))}
 .wrap{max-width:820px;margin:0 auto;display:flex;flex-direction:column;min-height:100dvh}
@@ -58,14 +59,25 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
 .mtg{display:grid;gap:6px;padding:10px 0;border-top:1px solid var(--line)}
 .mtg:first-child{border-top:0}
 .mtg .t{font-weight:600}
-.composer{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:10px 0 max(10px,env(safe-area-inset-bottom));display:flex;gap:8px}
-.composer textarea{flex:1;min-height:44px;max-height:120px;resize:none}
+.composer{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:10px 0 max(10px,env(safe-area-inset-bottom));display:grid;gap:8px}
+.dockHead{display:flex;gap:8px;align-items:center;justify-content:space-between}
+.dockHead .hint{flex:1;min-width:0}
+.dockOpts{display:grid;gap:6px;max-height:42vh;overflow-y:auto}
+.typeRow{display:flex;gap:8px}
+.typeRow textarea{flex:1;min-height:44px;max-height:120px;resize:none}
+.reply.pick{cursor:pointer;border:1px solid transparent;text-align:left;font:inherit;color:inherit;width:100%}
+.reply.pick:active{border-color:var(--accent)}
+.reply.picked{border-color:var(--accent)}
+.overlay{position:fixed;inset:0;z-index:20;background:var(--bg);display:flex;flex-direction:column;justify-content:center;gap:22px;padding:max(24px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left))}
+.ovTag{font-size:.85rem;font-weight:700;color:var(--accent)}
+.ovEn{font-size:clamp(1.6rem,6vw,2.4rem);line-height:1.35;font-weight:600}
+.ovZh{font-size:1.05rem;color:var(--muted);line-height:1.5}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="bar">
-    <h1>會議口譯 <span class="hint" style="font-weight:400">v6</span></h1>
+    <h1>會議口譯 <span class="hint" style="font-weight:400">v7.1</span></h1>
     <button id="toggle" class="primary">開始聆聽</button>
     <button id="newMeeting">新會議</button>
     <button id="exportBtn">匯出</button>
@@ -136,9 +148,23 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
   </div>
   <div class="interim" id="interim"></div>
 
-  <div class="composer">
-    <textarea id="say" rows="1" placeholder="我想說（中文）→ 幫我講成英文"></textarea>
-    <button id="sayBtn" class="primary">英文</button>
+  <div class="composer" id="dock">
+    <div class="dockHead">
+      <span class="hint" id="dockTitle">對方提問時，這裡會出現建議回答，點一下就能放大照著念。</span>
+      <button id="typeToggle" class="mini">✏️ 自己輸入</button>
+    </div>
+    <div class="dockOpts" id="dockOpts"></div>
+    <div class="typeRow" id="typeRow" hidden>
+      <textarea id="say" rows="1" placeholder="我想說（中文）→ 幫我講成英文"></textarea>
+      <button id="sayBtn" class="primary">英文</button>
+    </div>
+  </div>
+
+  <div class="overlay" id="overlay" hidden>
+    <div class="ovTag" id="ovTag"></div>
+    <div class="ovEn" id="ovEn"></div>
+    <div class="ovZh" id="ovZh"></div>
+    <button id="ovClose" class="primary">說完了，回到會議</button>
   </div>
 </div>
 
@@ -270,8 +296,13 @@ ${recent(8) || "（無）"}
 輸出格式：
 {"zh":"中文翻譯","note":"若有難懂的用語、語氣或言外之意，用一句話說明；沒有就空字串",
  "reply_needed":${forceReply ? "true" : "true 或 false（對方在問我方問題、要求確認或等我方表態時為 true）"},
- "replies":[{"tone":"2-6字策略，如 同意確認／爭取時間／提出疑問","en":"簡短口語、會議中好講出口的英文","zh":"中文意思"}]}
-${forceReply ? "replies 給 3 個。" : (wantAuto ? "reply_needed 為 true 時 replies 給 3 個，否則給空陣列。" : "replies 給空陣列。")}`;
+ "replies":[{"tone":"直接回答","en":"我方可以直接講出口的英文","zh":"中文意思"}]}
+${forceReply ? "replies 給 3 個。" : (wantAuto ? "reply_needed 為 true 時 replies 給 3 個，否則給空陣列。" : "replies 給空陣列。")}
+replies 的寫法（這些是「我方的回答」，要能直接照著念）：
+- 若對方在提問：第 1 個 tone「直接回答」：依背景資料直接回答，帶具體數字、條件、儀器或文件名，1～2 句；第 2 個 tone「補充說明」：同樣的答案再補上限制或現況（例如規格仍是初步、待 formulation lock）；第 3 個 tone「需要確認」：資料不足或不宜當場承諾時，得體地說會確認後回覆。
+- 背景資料沒有答案時，不可編造數字：第 1 個改成說明目前已知的最接近事實，並表示會再確認。
+- 若對方是要求我方確認或表態（不是提問）：tone 改用「同意」「有條件同意」「保留」。
+- 英文要口語、簡短、會議中好講出口；專有名詞保留原文。`;
   try {
     const raw = await callClaude(sysPrompt(), user, 1500);
     let out;
@@ -285,23 +316,50 @@ ${forceReply ? "replies 給 3 個。" : (wantAuto ? "reply_needed 為 true 時 r
     body.replaceChildren();
     if (out.zh) body.append(el("div", "zh", out.zh));
     if (out.note) body.append(el("div", "note", "💡 " + out.note));
-    renderReplies(body, out.replies);
-    if (!out.replies || !out.replies.length) addReplyBtn(card, en);
+    renderReplies(body, out.replies, en);
+    if (out.replies && out.replies.length) setDock(out.replies, out.zh || en, en);
+    else addReplyBtn(card, en);
   } catch(e){
     body.replaceChildren(el("div", "err", e.msg || "翻譯失敗，可再試一次。"));
     const b = el("button", "mini", "重試"); b.onclick = () => translate(card, en, forceReply); body.append(b);
   }
 }
-function renderReplies(body, replies){
+function replyButton(r, q){
+  const d = el("button", "reply pick"); d.type = "button";
+  d.append(el("div", "tone", r.tone || ""), el("div", "ren", r.en || ""), el("div", "rzh", r.zh || ""));
+  d.onclick = () => { chooseReply(r, q); d.classList.add("picked"); };
+  return d;
+}
+function renderReplies(body, replies, q){
   if (!replies || !replies.length) return;
   const box = el("div", "replies");
-  replies.forEach(r => {
-    const d = el("div", "reply");
-    d.append(el("div", "tone", r.tone || ""), el("div", "ren", r.en || ""), el("div", "rzh", r.zh || ""));
-    box.append(d);
-  });
+  replies.forEach(r => box.append(replyButton(r, q)));
   body.append(box);
 }
+/* Answer dock: latest question's answers, pick one to read aloud */
+function setDock(replies, qzh, q){
+  $("#dockTitle").textContent = "對方問：" + qzh;
+  const opts = $("#dockOpts"); opts.replaceChildren();
+  replies.forEach(r => opts.append(replyButton(r, q)));
+}
+function chooseReply(r, q){
+  $("#empty")?.remove();
+  lines.push({t: nowHM(), me: true, zh: r.zh || "", en: r.en || "", picked: true}); saveLines();
+  const card = el("div", "card me"); card.dataset.idx = lines.length - 1;
+  card.append(el("div", "note", lines[lines.length - 1].t + "　我方回答（" + (r.tone || "選擇") + "）"), el("div", "en", r.en || ""), el("div", "note", r.zh || ""));
+  feed.append(card);
+  $("#ovTag").textContent = r.tone || "回答";
+  $("#ovEn").textContent = r.en || "";
+  $("#ovZh").textContent = r.zh || "";
+  $("#overlay").hidden = false;
+}
+$("#ovClose").onclick = () => {
+  $("#overlay").hidden = true;
+  $("#dockOpts").replaceChildren();
+  $("#dockTitle").textContent = "對方提問時，這裡會出現建議回答，點一下就能放大照著念。";
+  scrollDown();
+};
+$("#typeToggle").onclick = () => { const r = $("#typeRow"); r.hidden = !r.hidden; if (!r.hidden) $("#say").focus(); };
 function addReplyBtn(card, en){
   const b = el("button", "mini", "我要怎麼回？");
   b.onclick = () => translate(card, en, true);
@@ -321,10 +379,9 @@ async function sayEnglish(){
   const zh = $("#say").value.trim(); if (!zh) return;
   $("#say").value = "";
   $("#empty")?.remove();
-  lines.push({t: nowHM(), me: true, zh, en: ""}); saveLines();
-  const card = el("div", "card me"); card.dataset.idx = lines.length - 1;
-  card.append(el("div", "note", lines[lines.length - 1].t + "　我想說：" + zh));
-  const setMine = en => { const i = card.dataset.idx; if (lines[i]){ lines[i].en = en || ""; saveLines(); } };
+  const card = el("div", "card me");
+  card.append(el("div", "note", nowHM() + "　我想說：" + zh + "（點選一個說法就會放大）"));
+  const setMine = en => { lines.push({t: nowHM(), me: true, zh, en: en || ""}); saveLines(); };
   const body = el("div", "body"); body.append(el("div", "wait", "產生中…")); card.append(body);
   feed.append(card); scrollDown();
   if (!hasKey()){
@@ -340,7 +397,7 @@ ${recent(6) || "（無）"}
 輸出格式：{"replies":[{"tone":"建議／較正式／較輕鬆 等","en":"英文說法","zh":"差別說明"}]} 給 3 個，第一個是最推薦、最好講出口的。`;
   try {
     const out = parseJSON(await callClaude(sysPrompt(), user, 600));
-    setMine(out.replies && out.replies[0] && out.replies[0].en); body.replaceChildren(); renderReplies(body, out.replies);
+    body.replaceChildren(); renderReplies(body, out.replies, zh);
   } catch(e){ body.replaceChildren(el("div", "err", e.msg || "產生失敗，可再試一次。")); }
   scrollDown();
 }
@@ -496,7 +553,7 @@ if (lines.length){
   $("#empty")?.remove();
   lines.forEach((l, i) => {
     const card = el("div", "card" + (l.me ? " me" : "")); card.dataset.idx = i;
-    if (l.me){ card.append(el("div", "note", (l.t || "") + "　我想說：" + l.zh)); if (l.en) card.append(el("div", "en", l.en)); }
+    if (l.me){ card.append(el("div", "note", (l.t || "") + (l.picked ? "　我方回答：" : "　我想說：") + l.zh)); if (l.en) card.append(el("div", "en", l.en)); }
     else { card.append(el("div", "note", l.t || ""), el("div", "en", l.en)); if (l.zh) card.append(el("div", "zh", l.zh)); }
     feed.append(card);
   });
