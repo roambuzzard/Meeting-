@@ -59,6 +59,12 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
 .mtg{display:grid;gap:6px;padding:10px 0;border-top:1px solid var(--line)}
 .mtg:first-child{border-top:0}
 .mtg .t{font-weight:600}
+.card.raw .en{color:var(--muted);font-size:.92rem}
+.card.an{border-color:var(--accent)}
+.an ul{margin:0;padding-left:1.2em;display:grid;gap:4px}
+.para{display:grid;gap:2px;padding:6px 0;border-top:1px solid var(--line)}
+.para .en{font-size:.85rem}
+.qblock{display:grid;gap:6px;padding-top:6px}
 .composer{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:10px 0 max(10px,env(safe-area-inset-bottom));display:grid;gap:8px}
 .dockHead{display:flex;gap:8px;align-items:center;justify-content:space-between}
 .dockHead .hint{flex:1;min-width:0}
@@ -77,9 +83,11 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
 <body>
 <div class="wrap">
   <div class="bar">
-    <h1>會議口譯 <span class="hint" style="font-weight:400">v9</span></h1>
+    <h1>會議口譯 <span class="hint" style="font-weight:400">v11</span></h1>
     <button id="toggle" class="primary">開始聆聽</button>
+    <button id="analyzeBtn" hidden>分析到這裡</button>
     <button id="newMeeting">新會議</button>
+    <button id="saveAudio" hidden>儲存錄音</button>
     <button id="exportBtn">匯出</button>
     <div class="status"><span class="dot" id="dot"></span><span id="statusText">尚未開始</span></div>
   </div>
@@ -134,7 +142,25 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
           </select>
         </label>
       </div>
-      <label for="seg">斷句方式
+      <label for="mode">運作方式
+        <select id="mode">
+          <option value="live">即時翻譯（每句都翻譯）</option>
+          <option value="log">雙軌：先記錄英文，按「分析」或「停止」才整理</option>
+        </select>
+      </label>
+      <label for="audio">全程錄音（實驗功能，會後可存成聲音檔）
+        <select id="audio">
+          <option value="off">關閉</option>
+          <option value="on">開啟</option>
+        </select>
+      </label>
+      <label for="engine">收音方式
+        <select id="engine">
+          <option value="cont">連續收音（不中斷，建議）</option>
+          <option value="restart">逐句重啟（舊版，若連續收音有問題再用）</option>
+        </select>
+      </label>
+      <label for="seg">斷句方式（逐句重啟時適用）
         <select id="seg">
           <option value="full">完整收音（等對方停頓才斷句，建議）</option>
           <option value="fast">快速（長句中途切開，字出來較快但可能漏字）</option>
@@ -181,10 +207,10 @@ const store = {
   get(k, d){ try { const v = localStorage.getItem(k); return v == null ? d : v; } catch(e){ return d; } },
   set(k, v){ try { localStorage.setItem(k, v); } catch(e){} }
 };
-["key","ctx","bg","accent","model","auto","size","seg"].forEach(id => {
+["key","ctx","bg","accent","model","auto","size","seg","mode","audio","engine"].forEach(id => {
   const el = $("#"+id); const v = store.get("mi_"+id, null);
   if (v != null) el.value = v;
-  const save = () => { store.set("mi_"+id, el.value); applySize(); bgCount(); };
+  const save = () => { store.set("mi_"+id, el.value); applySize(); bgCount(); if (typeof applyMode === "function") applyMode(); };
   el.addEventListener("change", save);
   el.addEventListener("input", save);
 });
@@ -408,14 +434,63 @@ function addReplyBtn(card, en){
   card.querySelector(".body").append(b);
 }
 
+const isLog = () => $("#mode").value === "log";
 function addHeard(en){
   $("#empty")?.remove();
   lines.push({t: nowHM(), en, zh: ""}); saveLines();
-  const card = el("div", "card"); card.dataset.idx = lines.length - 1;
+  const card = el("div", "card" + (isLog() ? " raw" : "")); card.dataset.idx = lines.length - 1;
   card.append(el("div", "note", lines[lines.length - 1].t), el("div", "en", en), el("div", "body"));
   feed.append(card); scrollDown();
-  translate(card, en, false);
+  if (!isLog()) translate(card, en, false);   // dual-track mode: just record, analyze later
 }
+
+/* ---------- Dual-track: analyze everything since the last analysis ---------- */
+function anIdx(){ return Number(store.get("mi_an_idx", "0")) || 0; }
+function applyMode(){ $("#analyzeBtn").hidden = !isLog(); }
+async function analyze(){
+  if (!hasKey()){ setStatus("分析需要 API 金鑰，請到設定貼上。", listening); return; }
+  const pending = lines.slice(anIdx()).filter(l => !l.me && !l.an && l.en).map(l => "[" + l.t + "] " + l.en);
+  const live = wordsOf(current).slice(committedWords).join(" ");
+  if (live.split(" ").length >= 3) pending.push("[" + nowHM() + "] " + live + "（辨識中）");
+  if (!pending.length){ setStatus("目前沒有新的內容可以分析。", listening); return; }
+  store.set("mi_an_idx", String(lines.length));
+  $("#empty")?.remove();
+  const card = el("div", "card an"), body = el("div", "body");
+  card.append(el("div", "note", nowHM() + "　分析 " + pending.length + " 段" + (listening ? "（聆聽繼續進行中）" : "")), body);
+  body.append(el("div", "wait", "分析中…"));
+  feed.append(card); scrollDown();
+  const user =
+`以下是對方從上次分析之後說的話（語音辨識結果，可能有錯字、沒有標點）：
+${pending.join("\n")}
+
+更早的對話（僅供理解上下文）：
+${recent(6) || "（無）"}
+
+請整理這一段。只輸出一個 JSON 物件，不要其他文字或程式碼框：
+{"summary":["這段的中文重點，2～5 點"],
+ "paragraphs":[{"en":"依背景資料修正辨識錯字、加上標點後的英文（完整保留內容，不要摘要）","zh":"自然的中文翻譯"}],
+ "questions":[{"zh":"對方問我方的問題或要我方表態的事（中文）","replies":[{"tone":"直接回答","en":"英文","zh":"中文意思"}]}]}
+- paragraphs：把零碎的句子合併成自然的段落。
+- questions：只列需要我方回應的；沒有就給空陣列。每題給 3 個 replies：「直接回答」依背景資料帶具體數字；「補充說明」補上限制或現況；「需要確認」得體地說會確認後回覆。若是要我方表態，改用「同意」「有條件同意」「保留」。
+- 背景資料沒有的資訊不可編造數字。英文口語、簡短、好講出口。`;
+  try {
+    const out = parseJSON(await callClaude(sysPrompt(), user, 4000));
+    body.replaceChildren();
+    const sum = (out.summary || []).filter(Boolean);
+    if (sum.length){ const ul = el("ul"); sum.forEach(x => ul.append(el("li", "zh", x))); body.append(ul); }
+    (out.paragraphs || []).forEach(pg => { const d = el("div", "para"); d.append(el("div", "en", pg.en || ""), el("div", null, pg.zh || "")); body.append(d); });
+    const qs = (out.questions || []).filter(q => q.replies && q.replies.length);
+    qs.forEach(q => { const b = el("div", "qblock"); b.append(el("div", "tone", "對方問：" + (q.zh || ""))); body.append(b); renderReplies(b, q.replies, q.zh); });
+    if (qs.length){ const last = qs[qs.length - 1]; setDock(last.replies, last.zh, last.zh); }
+    lines.push({t: nowHM(), an: true, zh: sum.join("；") + (qs.length ? "｜對方問：" + qs.map(q => q.zh).join("；") : ""), en: ""}); saveLines();
+    store.set("mi_an_idx", String(lines.length));
+  } catch(e){
+    store.set("mi_an_idx", String(Math.max(0, lines.length - pending.length)));
+    body.replaceChildren(el("div", "err", e.msg || "分析失敗，可再按一次「分析到這裡」。"));
+  }
+  scrollDown();
+}
+$("#analyzeBtn").onclick = analyze;
 
 async function sayEnglish(){
   const zh = $("#say").value.trim(); if (!zh) return;
@@ -467,12 +542,46 @@ function splitLong(){
   }
   $("#interim").textContent = wordsOf(current).slice(committedWords).join(" ");
 }
+const isCont = () => $("#engine").value === "cont";
+let lastResults = null, committedRes = 0, lastCommitted = "";
+function joinSegs(list){
+  let t = "";
+  for (const seg of list) t += (t && !/\s$/.test(t) && !/^\s/.test(seg) ? " " : "") + seg;
+  return t.trim();
+}
+/* Continuous mode: recognition never restarts; a pause just closes the current card */
+function commitCont(){
+  if (!lastResults) return;
+  const segs = [];
+  for (let i = committedRes; i < lastResults.length; i++) segs.push(lastResults[i][0].transcript);
+  committedRes = lastResults.length;
+  let text = joinSegs(segs);
+  // some iOS versions repeat everything said so far inside a new result: drop the repeated part
+  const norm = x => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const prevW = wordsOf(norm(lastCommitted)), w = wordsOf(text);
+  if (prevW.length && wordsOf(norm(text)).slice(0, prevW.length).join(" ") === prevW.join(" ")) text = w.slice(prevW.length).join(" ");
+  current = ""; committedWords = 0; $("#interim").textContent = "";
+  if (wordsOf(text).length >= 2){ lastCommitted = (lastCommitted + " " + text).trim(); addHeard(text); }
+}
 function startRec(){
   rec = new SR();
   rec.lang = $("#accent").value;
-  rec.continuous = false;       // one utterance per session = natural sentence breaks
+  const cont = isCont();
+  rec.continuous = cont;        // cont: one long session; restart: one utterance per session
   rec.interimResults = true;
+  lastResults = null; committedRes = 0; lastCommitted = "";
   rec.onresult = e => {
+    restartFails = 0;
+    clearTimeout(silenceTimer);
+    if (cont){
+      lastResults = e.results;
+      const segs = [];
+      for (let i = committedRes; i < e.results.length; i++) segs.push(e.results[i][0].transcript);
+      current = joinSegs(segs);
+      $("#interim").textContent = current;
+      silenceTimer = setTimeout(commitCont, 1400);           // pause = end of card, mic stays on
+      return;
+    }
     let t = "";
     for (let i = 0; i < e.results.length; i++){
       const seg = e.results[i][0].transcript;
@@ -480,11 +589,12 @@ function startRec(){
     }
     current = t;
     splitLong();
-    restartFails = 0;
-    clearTimeout(silenceTimer);
     silenceTimer = setTimeout(() => { try { rec.stop(); } catch(e){} }, $("#seg").value === "fast" ? 1000 : 1400); // pause = end of sentence
   };
   rec.onerror = e => {
+    if (e.error === "audio-capture" && $("#audio").value === "on" && ++captureErrs >= 3){
+      setStatus("錄音和語音辨識互相衝突：請到設定把「全程錄音」關閉。", listening);
+    }
     if (e.error === "not-allowed" || e.error === "service-not-allowed"){
       stopListening();
       setStatus("無法使用麥克風：請到 設定 → Safari → 麥克風 允許，並確認「聽寫」已開啟。", false);
@@ -492,10 +602,11 @@ function startRec(){
   };
   rec.onend = () => {
     clearTimeout(silenceTimer);
-    commit();
+    if (cont) commitCont(); else commit();
     if (!listening) return;
+    // iOS may still end a continuous session (long silence, time limit): restart right away
     if (Date.now() - lastStart < 400) restartFails++;
-    const delay = restartFails > 5 ? 1500 : 60;
+    const delay = restartFails > 5 ? 1500 : 30;
     setTimeout(() => { if (listening) { lastStart = Date.now(); try { startRec(); } catch(e){} } }, delay);
   };
   lastStart = Date.now();
@@ -506,12 +617,44 @@ async function keepAwake(){
 }
 document.addEventListener("visibilitychange", () => { if (listening && document.visibilityState === "visible") keepAwake(); });
 
+/* ---------- Optional full audio recording (experimental) ---------- */
+let mediaRec = null, audioChunks = [], audioBlob = null, audioType = "", audioStream = null, audioStart = 0, captureErrs = 0;
+async function startAudio(){
+  if ($("#audio").value !== "on") return;
+  if (!navigator.mediaDevices || !window.MediaRecorder){ setStatus("這台裝置不支援錄音，只記錄文字。", true); return; }
+  try {
+    audioStream = await navigator.mediaDevices.getUserMedia({audio: true});
+    audioType = MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "audio/webm";
+    audioChunks = []; audioStart = Date.now();
+    mediaRec = new MediaRecorder(audioStream, {mimeType: audioType});
+    mediaRec.ondataavailable = e => { if (e.data && e.data.size) audioChunks.push(e.data); };
+    mediaRec.onstop = () => {
+      audioBlob = new Blob(audioChunks, {type: audioType});
+      try { audioStream.getTracks().forEach(t => t.stop()); } catch(e){}
+      $("#saveAudio").hidden = !audioBlob.size;
+    };
+    mediaRec.start(10000);
+  } catch(e){ setStatus("無法開始錄音，只記錄文字。", true); }
+}
+function stopAudio(){ try { if (mediaRec && mediaRec.state !== "inactive") mediaRec.stop(); } catch(e){} }
+$("#saveAudio").onclick = async () => {
+  if (!audioBlob) return;
+  const d = new Date(audioStart || Date.now());
+  const name = "會議錄音_" + d.getFullYear() + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0") + "_" + d.toTimeString().slice(0, 5).replace(":", "") + (audioType === "audio/mp4" ? ".m4a" : ".webm");
+  try {
+    const file = new File([audioBlob], name, {type: audioType});
+    if (navigator.canShare && navigator.canShare({files: [file]})){ await navigator.share({files: [file], title: name}); return; }
+  } catch(e){ if (e && e.name === "AbortError") return; }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(audioBlob); a.download = name; document.body.append(a); a.click(); a.remove();
+};
+
 function startListening(){
   if (!SR){ setStatus("這個瀏覽器不支援語音辨識，請用 iPhone／iPad 的 Safari 開啟。", false); return; }
   listening = true; restartFails = 0;
   $("#toggle").textContent = "停止"; $("#toggle").className = "stop";
   setStatus(hasKey() ? "聆聽中…（螢幕請保持開啟）" : "測試模式聆聽中：免費翻譯、沒有回覆建議", true);
   keepAwake();
+  captureErrs = 0; startAudio();
   try { startRec(); } catch(e){ setStatus("無法啟動語音辨識，請重新整理頁面。", false); listening = false; }
 }
 function stopListening(){
@@ -519,7 +662,9 @@ function stopListening(){
   try { rec && rec.stop(); } catch(e){}
   try { wakeLock && wakeLock.release(); } catch(e){}
   $("#toggle").textContent = "開始聆聽"; $("#toggle").className = "primary";
-  setStatus("已停止", false);
+  stopAudio();
+  setStatus("已停止" + ($("#audio").value === "on" ? "，錄音請按「儲存錄音」保存（關掉網頁就會消失）" : ""), false);
+  if (isLog()) setTimeout(analyze, 300);   // dual-track: stopping = analyze what was recorded
 }
 $("#toggle").onclick = () => listening ? stopListening() : startListening();
 /* ---------- Meetings: current one + archived list ---------- */
@@ -535,7 +680,8 @@ function transcriptText(m){
   const out = ["會議逐字稿（" + ymd + " " + d.toTimeString().slice(0, 5) + "）" + (m.ctx ? "\n會議情境：" + m.ctx : ""),
     "格式：[時間] 對方英文原文（語音辨識，可能有錯字）／中文翻譯；「我方」為我想表達的內容", ""];
   m.lines.forEach(l => {
-    if (l.me) out.push("[" + (l.t || "") + "] 我方：" + l.zh + (l.en ? "\n    EN: " + l.en : ""));
+    if (l.an) out.push("[" + (l.t || "") + "] 【分析重點】" + l.zh);
+    else if (l.me) out.push("[" + (l.t || "") + "] 我方：" + l.zh + (l.en ? "\n    EN: " + l.en : ""));
     else out.push("[" + (l.t || "") + "] " + l.en + (l.zh ? "\n    中：" + l.zh : ""));
   });
   return {name: "會議逐字稿_" + ymd + "_" + d.toTimeString().slice(0, 5).replace(":", "") + ".txt", text: out.join("\n")};
@@ -582,7 +728,7 @@ confirmTwice($("#newMeeting"), "新會議", () => {
     meetings.unshift({start: Number(store.get("mi_cur_start", Date.now())), end: Date.now(), ctx: $("#ctx").value.trim(), lines: lines.slice()});
     saveMeetings();
   }
-  lines.length = 0; saveLines(); store.set("mi_cur_start", String(Date.now()));
+  lines.length = 0; saveLines(); store.set("mi_cur_start", String(Date.now())); store.set("mi_an_idx", "0");
   const msg = el("div", "empty", "新會議已開始。上一場已存到「過去的會議」，可以隨時匯出。"); msg.id = "empty";
   feed.replaceChildren(msg);
   $("#interim").textContent = "";
@@ -594,13 +740,15 @@ confirmTwice($("#newMeeting"), "新會議", () => {
 if (lines.length){
   $("#empty")?.remove();
   lines.forEach((l, i) => {
-    const card = el("div", "card" + (l.me ? " me" : "")); card.dataset.idx = i;
-    if (l.me){ card.append(el("div", "note", (l.t || "") + (l.picked ? "　我方回答：" : "　我想說：") + l.zh)); if (l.en) card.append(el("div", "en", l.en)); }
+    const card = el("div", "card" + (l.me ? " me" : "") + (l.an ? " an" : "")); card.dataset.idx = i;
+    if (l.an){ card.append(el("div", "note", (l.t || "") + "　分析重點"), el("div", "zh", l.zh)); }
+    else if (l.me){ card.append(el("div", "note", (l.t || "") + (l.picked ? "　我方回答：" : "　我想說：") + l.zh)); if (l.en) card.append(el("div", "en", l.en)); }
     else { card.append(el("div", "note", l.t || ""), el("div", "en", l.en)); if (l.zh) card.append(el("div", "zh", l.zh)); }
     feed.append(card);
   });
 }
 if (!SR) setStatus("這個瀏覽器不支援語音辨識，請用 Safari 開啟。", false);
+applyMode();
 </script>
 </body>
 </html>
