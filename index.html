@@ -77,7 +77,7 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
 <body>
 <div class="wrap">
   <div class="bar">
-    <h1>會議口譯 <span class="hint" style="font-weight:400">v8</span></h1>
+    <h1>會議口譯 <span class="hint" style="font-weight:400">v9</span></h1>
     <button id="toggle" class="primary">開始聆聽</button>
     <button id="newMeeting">新會議</button>
     <button id="exportBtn">匯出</button>
@@ -134,6 +134,12 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--ink);background:va
           </select>
         </label>
       </div>
+      <label for="seg">斷句方式
+        <select id="seg">
+          <option value="full">完整收音（等對方停頓才斷句，建議）</option>
+          <option value="fast">快速（長句中途切開，字出來較快但可能漏字）</option>
+        </select>
+      </label>
       <p class="hint">金鑰存在本機瀏覽器，不會傳到 Anthropic 以外的地方。<br>沒有金鑰也能用「測試模式」：語音辨識＋免費翻譯（品質普通、每天有上限），但沒有回覆建議。</p>
     </div>
   </details>
@@ -175,7 +181,7 @@ const store = {
   get(k, d){ try { const v = localStorage.getItem(k); return v == null ? d : v; } catch(e){ return d; } },
   set(k, v){ try { localStorage.setItem(k, v); } catch(e){} }
 };
-["key","ctx","bg","accent","model","auto","size"].forEach(id => {
+["key","ctx","bg","accent","model","auto","size","seg"].forEach(id => {
   const el = $("#"+id); const v = store.get("mi_"+id, null);
   if (v != null) el.value = v;
   const save = () => { store.set("mi_"+id, el.value); applySize(); bgCount(); };
@@ -315,7 +321,7 @@ ${recent(8) || "（無）"}
 第一行：自然的中文翻譯
 第二行：對方是在向我方提問、要求確認或等我方表態就寫 Q，否則寫 -`;
   try {
-    const raw = await callClaude(sysPrompt(), user, 400, text => {
+    const raw = await callClaude(sysPrompt(), user, 1200, text => {
       const first = text.split("\n")[0];
       if (first.trim()){ if (wait.isConnected) body.replaceChildren(zhEl); zhEl.textContent = first; }
     });
@@ -454,7 +460,7 @@ function commit(){
 }
 function splitLong(){
   const w = wordsOf(current);
-  if (w.length - committedWords >= CHUNK){
+  if ($("#seg").value === "fast" && w.length - committedWords >= CHUNK){
     const end = w.length - HOLD;
     addHeard(w.slice(committedWords, end).join(" "));
     committedWords = end;
@@ -476,7 +482,7 @@ function startRec(){
     splitLong();
     restartFails = 0;
     clearTimeout(silenceTimer);
-    silenceTimer = setTimeout(() => { try { rec.stop(); } catch(e){} }, 1000); // pause = end of sentence
+    silenceTimer = setTimeout(() => { try { rec.stop(); } catch(e){} }, $("#seg").value === "fast" ? 1000 : 1400); // pause = end of sentence
   };
   rec.onerror = e => {
     if (e.error === "not-allowed" || e.error === "service-not-allowed"){
